@@ -6,6 +6,7 @@ import json
 import math
 import os
 import sys
+import copy
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -94,7 +95,50 @@ def forecast_case(case: dict, name: str) -> dict:
     if case.get("levels") != LEVELS:
         raise ValueError(f"{name} asks for levels {case['levels']}, not {LEVELS}")
     trophies = case["trophies"]
-    history = case["history"]
+    history = copy.deepcopy(case["history"])
+    num_trophies = len(trophies)
+
+    # Pre-process: Interpolate null rates
+    trophy_rates = [[] for _ in range(num_trophies)]
+    for h_item in history:
+        dt = parse_iso(h_item.get("at", h_item.get("slot")))
+        rates = h_item.get("rates", [])
+        for i in range(num_trophies):
+            r = rates[i] if i < len(rates) else None
+            trophy_rates[i].append((dt, r))
+
+    for i in range(num_trophies):
+        series = trophy_rates[i]
+        for j in range(len(series)):
+            dt, r = series[j]
+            if r is None:
+                prev_idx = j - 1
+                while prev_idx >= 0 and series[prev_idx][1] is None:
+                    prev_idx -= 1
+                next_idx = j + 1
+                while next_idx < len(series) and series[next_idx][1] is None:
+                    next_idx += 1
+                if prev_idx >= 0 and next_idx < len(series):
+                    t_prev, r_prev = series[prev_idx]
+                    t_next, r_next = series[next_idx]
+                    span = (t_next - t_prev).total_seconds()
+                    if span > 0:
+                        weight = (dt - t_prev).total_seconds() / span
+                        series[j] = (dt, r_prev + weight * (r_next - r_prev))
+                    else:
+                        series[j] = (dt, r_prev)
+                elif prev_idx >= 0:
+                    series[j] = (dt, series[prev_idx][1])
+                elif next_idx < len(series):
+                    series[j] = (dt, series[next_idx][1])
+                else:
+                    series[j] = (dt, 0.0)
+
+    for j in range(len(history)):
+        for i in range(num_trophies):
+            if i < len(history[j]["rates"]):
+                history[j]["rates"][i] = trophy_rates[i][j][1]
+
     horizon_days = case["horizon_minutes"] / 1440.0
     target_dt = parse_iso(case.get("target"))
 
